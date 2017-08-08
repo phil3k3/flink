@@ -24,7 +24,12 @@ import org.junit.Assert;
 import org.junit.Test;
 
 import java.io.File;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.file.Files;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.core.Is.is;
 
 /**
  * Tests for the {@link PackagedProgramTest}.
@@ -53,6 +58,36 @@ public class PackagedProgramTest {
 			System.err.println(e.getMessage());
 			e.printStackTrace();
 			Assert.fail("Test is erroneous: " + e.getMessage());
+		}
+	}
+
+	@Test
+	public void failingRemoveJarFileTest() {
+		File testFile = null;
+		try {
+			testFile = File.createTempFile("testjar-", "jar");
+			File jarFile = new File(CliFrontendTestUtils.getTestJarPath());
+			Files.deleteIfExists(testFile.toPath());
+			Files.copy(jarFile.toPath(), testFile.toPath());
+			PackagedProgram prog = new PackagedProgram(testFile);
+			prog.deleteExtractedLibraries();
+			assertThat(testFile.delete(), is(true));
+		}
+		catch (Exception e) {
+			System.err.println(e.getMessage());
+			e.printStackTrace();
+			Assert.fail("Test is erroneous: " + e.getMessage());
+		}
+		finally {
+			if (testFile != null) {
+				try {
+					Files.deleteIfExists(testFile.toPath());
+				} catch (IOException e) {
+					System.err.println(e.getMessage());
+					e.printStackTrace();
+					Assert.fail("Test is erroneous: " + e.getMessage());
+				}
+			}
 		}
 	}
 

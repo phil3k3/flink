@@ -28,6 +28,7 @@ import org.apache.flink.runtime.jobgraph.SavepointRestoreSettings;
 import org.apache.flink.util.InstantiationUtil;
 
 import java.io.BufferedInputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -465,6 +466,13 @@ public class PackagedProgram {
 	public void deleteExtractedLibraries() {
 		deleteExtractedLibraries(this.extractedTempLibraries);
 		this.extractedTempLibraries.clear();
+		if (Closeable.class.isAssignableFrom(this.userCodeClassLoader.getClass())) {
+			try {
+				((Closeable) this.userCodeClassLoader).close();
+			} catch (IOException e) {
+				throw new RuntimeException("Could not close class loader");
+			}
+		}
 	}
 
 	/**
