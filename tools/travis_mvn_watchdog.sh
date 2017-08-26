@@ -79,6 +79,7 @@ flink-connectors/flink-jdbc,\
 flink-connectors/flink-connector-cassandra,\
 flink-connectors/flink-connector-elasticsearch,\
 flink-connectors/flink-connector-elasticsearch2,\
+flink-connectors/flink-connector-elasticsearch5,\
 flink-connectors/flink-connector-elasticsearch-base,\
 flink-connectors/flink-connector-filesystem,\
 flink-connectors/flink-connector-kafka-0.8,\
@@ -92,14 +93,6 @@ flink-connectors/flink-connector-twitter"
 MODULES_TESTS="\
 flink-tests"
 
-if [[ $PROFILE == *"jdk8"* ]]; then
-	case $TEST in
-		(connectors)
-			MODULES_CONNECTORS="$MODULES_CONNECTORS,flink-connectors/flink-connector-elasticsearch5"
-		;;
-	esac
-fi
-
 if [[ $PROFILE == *"include-kinesis"* ]]; then
 	case $TEST in
 		(connectors)
@@ -109,23 +102,28 @@ if [[ $PROFILE == *"include-kinesis"* ]]; then
 fi
 
 MVN_COMPILE_MODULES=""
+MVN_COMPILE_OPTIONS=""
 MVN_TEST_MODULES=""
 case $TEST in
 	(core)
 		MVN_COMPILE_MODULES="-pl $MODULES_CORE -am"
 		MVN_TEST_MODULES="-pl $MODULES_CORE"
+		MVN_COMPILE_OPTIONS="-Dcheckstyle.skip=true -Djapicmp.skip=true"
 	;;
 	(libraries)
 		MVN_COMPILE_MODULES="-pl $MODULES_LIBRARIES -am"
 		MVN_TEST_MODULES="-pl $MODULES_LIBRARIES"
+		MVN_COMPILE_OPTIONS="-Dcheckstyle.skip=true -Djapicmp.skip=true"
 	;;
 	(connectors)
 		MVN_COMPILE_MODULES="-pl $MODULES_CONNECTORS -am"
 		MVN_TEST_MODULES="-pl $MODULES_CONNECTORS"
+		MVN_COMPILE_OPTIONS="-Dcheckstyle.skip=true -Djapicmp.skip=true"
 	;;
 	(tests)
 		MVN_COMPILE_MODULES="-pl $MODULES_TESTS -am"
 		MVN_TEST_MODULES="-pl $MODULES_TESTS"
+		MVN_COMPILE_OPTIONS="-Dcheckstyle.skip=true -Djapicmp.skip=true"
 	;;
 	(misc)
 		NEGATED_CORE=\!${MODULES_CORE//,/,\!}
@@ -135,6 +133,7 @@ case $TEST in
 		# compile everything since dist needs it anyway
 		MVN_COMPILE_MODULES=""
 		MVN_TEST_MODULES="-pl $NEGATED_CORE,$NEGATED_LIBRARIES,$NEGATED_CONNECTORS,$NEGATED_TESTS"
+		MVN_COMPILE_OPTIONS="-Dspotbugs"
 	;;
 esac
 
@@ -145,8 +144,11 @@ esac
 # -nsu option forbids downloading snapshot artifacts. The only snapshot artifacts we depend are from
 # Flink, which however should all be built locally. see FLINK-7230
 MVN_LOGGING_OPTIONS="-Dlog.dir=${ARTIFACTS_DIR} -Dlog4j.configuration=file://$LOG4J_PROPERTIES -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn"
-MVN_COMPILE="mvn -nsu -Dflink.forkCount=2 -Dflink.forkCountTestPackage=2 -DskipTests -Dmaven.javadoc.skip=true -B $PROFILE $MVN_LOGGING_OPTIONS $MVN_COMPILE_MODULES clean install"
-MVN_TEST="mvn -nsu -Dflink.forkCount=2 -Dflink.forkCountTestPackage=2 -Dmaven.javadoc.skip=true -B $PROFILE $MVN_LOGGING_OPTIONS $MVN_TEST_MODULES verify"
+MVN_COMMON_OPTIONS="-nsu -Dflink.forkCount=2 -Dflink.forkCountTestPackage=2 -Dmaven.javadoc.skip=true -B $MVN_LOGGING_OPTIONS"
+MVN_COMPILE_OPTIONS="$MVN_COMPILE_OPTIONS -DskipTests"
+
+MVN_COMPILE="mvn $MVN_COMMON_OPTIONS $MVN_COMPILE_OPTIONS $PROFILE $MVN_COMPILE_MODULES clean install"
+MVN_TEST="mvn $MVN_COMMON_OPTIONS $PROFILE $MVN_TEST_MODULES verify"
 
 MVN_PID="${ARTIFACTS_DIR}/watchdog.mvn.pid"
 MVN_EXIT="${ARTIFACTS_DIR}/watchdog.mvn.exit"
@@ -270,11 +272,11 @@ check_shaded_artifacts() {
 	ASM=`cat allClasses | grep '^org/objectweb/asm/' | wc -l`
 	if [ $ASM != "0" ]; then
 		echo "=============================================================================="
-		echo "Detected $ASM asm dependencies in fat jar"
+		echo "Detected $ASM unshaded asm dependencies in fat jar"
 		echo "=============================================================================="
 		return 1
 	fi
-	 
+
 	GUAVA=`cat allClasses | grep '^com/google/common' | wc -l`
 	if [ $GUAVA != "0" ]; then
 		echo "=============================================================================="
@@ -290,6 +292,15 @@ check_shaded_artifacts() {
 		echo "=============================================================================="
 		return 1
 	fi
+
+    NETTY=`cat allClasses | grep '^io/netty' | wc -1`
+	if [ $NETTY != "0" ]; then
+		echo "=============================================================================="
+		echo "Detected $NETTY unshaded netty dependencies in fat jar"
+		echo "=============================================================================="
+		return 1
+	fi
+
 	return 0
 }
 
@@ -335,11 +346,6 @@ echo "RUNNING '${MVN_COMPILE}'."
 # the exit code. This is important for Travis' build life-cycle (success/failure).
 ( $MVN_COMPILE & PID=$! ; echo $PID >&3 ; wait $PID ; echo $? >&4 ) 3>$MVN_PID 4>$MVN_EXIT | tee $MVN_OUT
 
-echo "Trying to KILL watchdog (${WD_PID})."
-
-# Make sure to kill the watchdog in any case after $MVN has completed
-( kill $WD_PID 2>&1 ) > /dev/null
-
 EXIT_CODE=$(<$MVN_EXIT)
 
 echo "MVN exited with EXIT CODE: ${EXIT_CODE}."
@@ -357,11 +363,6 @@ if [ $EXIT_CODE == 0 ]; then
 	# the exit code. This is important for Travis' build life-cycle (success/failure).
 	( $MVN_TEST & PID=$! ; echo $PID >&3 ; wait $PID ; echo $? >&4 ) 3>$MVN_PID 4>$MVN_EXIT | tee $MVN_OUT
 
-	echo "Trying to KILL watchdog (${WD_PID})."
-
-	# Make sure to kill the watchdog in any case after $MVN has completed
-	( kill $WD_PID 2>&1 ) > /dev/null
-
 	EXIT_CODE=$(<$MVN_EXIT)
 
 	echo "MVN exited with EXIT CODE: ${EXIT_CODE}."
@@ -375,6 +376,10 @@ else
 fi
 
 # Post
+
+# Make sure to kill the watchdog in any case after $MVN_COMPILE and $MVN_TEST have completed
+echo "Trying to KILL watchdog (${WD_PID})."
+( kill $WD_PID 2>&1 ) > /dev/null
 
 # only misc builds flink-dist and flink-yarn-tests
 case $TEST in
@@ -398,6 +403,33 @@ upload_artifacts_s3
 # since we are in flink/tools/artifacts
 # we are going back to
 cd ../../
+
+# only run end-to-end tests in misc because we only have flink-dist here
+case $TEST in
+	(misc)
+		if [ $EXIT_CODE == 0 ]; then
+			printf "\n\n==============================================================================\n"
+			printf "Running end-to-end tests\n"
+			printf "==============================================================================\n"
+
+			printf "\n==============================================================================\n"
+			printf "Running Wordcount end-to-end test\n"
+			printf "==============================================================================\n"
+			test-infra/end-to-end-test/test_batch_wordcount.sh build-target cluster
+			EXIT_CODE=$(($EXIT_CODE+$?))
+
+			printf "\n==============================================================================\n"
+			printf "Running Kafka end-to-end test\n"
+			printf "==============================================================================\n"
+			test-infra/end-to-end-test/test_streaming_kafka010.sh build-target cluster
+			EXIT_CODE=$(($EXIT_CODE+$?))
+		else
+			printf "\n==============================================================================\n"
+			printf "Previous build failure detected, skipping end-to-end tests.\n"
+			printf "==============================================================================\n"
+		fi
+	;;
+esac
 
 # Exit code for Travis build success/failure
 exit $EXIT_CODE
