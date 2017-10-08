@@ -120,14 +120,12 @@ public class TwoPhaseCommitSinkFunctionTest {
 		assertEquals(expectedValues, actualValues);
 	}
 
-	private static class FileBasedSinkFunction extends TwoPhaseCommitSinkFunction<String, FileTransaction> {
+	private static class FileBasedSinkFunction extends TwoPhaseCommitSinkFunction<String, FileTransaction, Void> {
 		private final File tmpDirectory;
 		private final File targetDirectory;
 
 		public FileBasedSinkFunction(File tmpDirectory, File targetDirectory) {
-			super(
-				TypeInformation.of(FileTransaction.class),
-				TypeInformation.of(new TypeHint<List<FileTransaction>>() {}));
+			super(TypeInformation.of(new TypeHint<State<FileTransaction, Void>>() {}));
 
 			if (!tmpDirectory.isDirectory() || !targetDirectory.isDirectory()) {
 				throw new IllegalArgumentException();
@@ -157,7 +155,10 @@ public class TwoPhaseCommitSinkFunctionTest {
 		@Override
 		protected void commit(FileTransaction transaction) {
 			try {
-				Files.move(transaction.tmpFile.toPath(), new File(targetDirectory, transaction.tmpFile.getName()).toPath(), ATOMIC_MOVE);
+				Files.move(
+					transaction.tmpFile.toPath(),
+					new File(targetDirectory, transaction.tmpFile.getName()).toPath(),
+					ATOMIC_MOVE);
 			} catch (IOException e) {
 				throw new IllegalStateException(e);
 			}

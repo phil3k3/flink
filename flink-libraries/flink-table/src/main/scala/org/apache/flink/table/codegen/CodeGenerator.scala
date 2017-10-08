@@ -41,8 +41,9 @@ import org.apache.flink.table.codegen.calls.FunctionGenerator
 import org.apache.flink.table.codegen.calls.ScalarOperators._
 import org.apache.flink.table.functions.sql.{ProctimeSqlFunction, ScalarSqlFunctions}
 import org.apache.flink.table.functions.utils.UserDefinedFunctionUtils
-import org.apache.flink.table.functions.{FunctionContext, UserDefinedFunction}
+
 import org.apache.flink.table.typeutils.TimeIndicatorTypeInfo
+import org.apache.flink.table.functions.{FunctionContext, UserDefinedFunction}
 import org.apache.flink.table.typeutils.TypeCheckUtils._
 
 import scala.collection.JavaConversions._
@@ -108,31 +109,31 @@ abstract class CodeGenerator(
 
   // set of member statements that will be added only once
   // we use a LinkedHashSet to keep the insertion order
-  private val reusableMemberStatements = mutable.LinkedHashSet[String]()
+  protected val reusableMemberStatements = mutable.LinkedHashSet[String]()
 
   // set of constructor statements that will be added only once
   // we use a LinkedHashSet to keep the insertion order
-  private val reusableInitStatements = mutable.LinkedHashSet[String]()
+  protected val reusableInitStatements = mutable.LinkedHashSet[String]()
 
   // set of open statements for RichFunction that will be added only once
   // we use a LinkedHashSet to keep the insertion order
-  private val reusableOpenStatements = mutable.LinkedHashSet[String]()
+  protected val reusableOpenStatements = mutable.LinkedHashSet[String]()
 
   // set of close statements for RichFunction that will be added only once
   // we use a LinkedHashSet to keep the insertion order
-  private val reusableCloseStatements = mutable.LinkedHashSet[String]()
+  protected val reusableCloseStatements = mutable.LinkedHashSet[String]()
 
   // set of statements that will be added only once per record
   // we use a LinkedHashSet to keep the insertion order
-  private val reusablePerRecordStatements = mutable.LinkedHashSet[String]()
+  protected val reusablePerRecordStatements = mutable.LinkedHashSet[String]()
 
   // map of initial input unboxing expressions that will be added only once
   // (inputTerm, index) -> expr
-  private val reusableInputUnboxingExprs = mutable.Map[(String, Int), GeneratedExpression]()
+  protected val reusableInputUnboxingExprs = mutable.Map[(String, Int), GeneratedExpression]()
 
   // set of constructor statements that will be added only once
   // we use a LinkedHashSet to keep the insertion order
-  private val reusableConstructorStatements = mutable.LinkedHashSet[(String, String)]()
+  protected val reusableConstructorStatements = mutable.LinkedHashSet[(String, String)]()
 
   /**
     * @return code block of statements that need to be placed in the member area of the Function
@@ -254,11 +255,31 @@ abstract class CodeGenerator(
         generateRowtimeAccess()
       case TimeIndicatorTypeInfo.PROCTIME_MARKER =>
         // attribute is proctime indicator.
-        // We use a null literal and generate a timestamp when we need it.
+        // we use a null literal and generate a timestamp when we need it.
         generateNullLiteral(TimeIndicatorTypeInfo.PROCTIME_INDICATOR)
       case idx =>
-        // regular attribute. Access attribute in input data type.
-        generateInputAccess(input1, input1Term, idx)
+        // get type of result field
+        val outIdx = input1Mapping.indexOf(idx)
+        val outType = returnType match {
+          case pt: PojoTypeInfo[_] => pt.getTypeAt(resultFieldNames(outIdx))
+          case ct: CompositeType[_] => ct.getTypeAt(outIdx)
+          case t: TypeInformation[_] => t
+        }
+        val inputAccess = generateInputAccess(input1, input1Term, idx)
+        // Change output type to rowtime indicator
+        if (FlinkTypeFactory.isRowtimeIndicatorType(outType) &&
+          (inputAccess.resultType == Types.LONG || inputAccess.resultType == Types.SQL_TIMESTAMP)) {
+          // This case is required for TableSources that implement DefinedRowtimeAttribute.
+          // Hard cast possible because LONG, TIMESTAMP, and ROWTIME_INDICATOR are internally
+          // represented as Long.
+          GeneratedExpression(
+            inputAccess.resultTerm,
+            inputAccess.nullTerm,
+            inputAccess.code,
+            TimeIndicatorTypeInfo.ROWTIME_INDICATOR)
+        } else {
+          inputAccess
+        }
     }
 
     val input2AccessExprs = input2 match {
@@ -1210,15 +1231,15 @@ abstract class CodeGenerator(
     }
 
     val wrappedCode = if (nullCheck && !isReference(fieldType)) {
+      // assumes that fieldType is a boxed primitive.
       s"""
-        |$tmpTypeTerm $tmpTerm = $unboxedFieldCode;
-        |boolean $nullTerm = $tmpTerm == null;
+        |boolean $nullTerm = $fieldTerm == null;
         |$resultTypeTerm $resultTerm;
         |if ($nullTerm) {
         |  $resultTerm = $defaultValue;
         |}
         |else {
-        |  $resultTerm = $tmpTerm;
+        |  $resultTerm = $fieldTerm;
         |}
         |""".stripMargin
     } else if (nullCheck) {
@@ -1458,9 +1479,10 @@ abstract class CodeGenerator(
     * Adds a reusable [[UserDefinedFunction]] to the member area of the generated [[Function]].
     *
     * @param function [[UserDefinedFunction]] object to be instantiated during runtime
+    * @param contextTerm [[RuntimeContext]] term to access the [[RuntimeContext]]
     * @return member variable term
     */
-  def addReusableFunction(function: UserDefinedFunction): String = {
+  def addReusableFunction(function: UserDefinedFunction, contextTerm: String = null): String = {
     val classQualifier = function.getClass.getCanonicalName
     val functionSerializedData = UserDefinedFunctionUtils.serialize(function)
     val fieldTerm = s"function_${function.functionIdentifier}"
@@ -1480,10 +1502,15 @@ abstract class CodeGenerator(
 
     reusableInitStatements.add(functionDeserialization)
 
-    val openFunction =
+    val openFunction = if (contextTerm != null) {
+      s"""
+         |$fieldTerm.open(new ${classOf[FunctionContext].getCanonicalName}($contextTerm));
+       """.stripMargin
+    } else {
       s"""
          |$fieldTerm.open(new ${classOf[FunctionContext].getCanonicalName}(getRuntimeContext()));
        """.stripMargin
+    }
     reusableOpenStatements.add(openFunction)
 
     val closeFunction =
