@@ -23,9 +23,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.IllegalConfigurationException;
 import org.apache.flink.configuration.QueryableStateOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
-import org.apache.flink.core.memory.HeapMemorySegment;
-import org.apache.flink.core.memory.HybridMemorySegment;
-import org.apache.flink.core.memory.MemorySegmentFactory;
 import org.apache.flink.core.memory.MemoryType;
 import org.apache.flink.runtime.akka.AkkaUtils;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
@@ -34,19 +31,22 @@ import org.apache.flink.runtime.memory.MemoryManager;
 import org.apache.flink.runtime.metrics.MetricRegistryConfiguration;
 import org.apache.flink.runtime.taskmanager.NetworkEnvironmentConfiguration;
 import org.apache.flink.util.MathUtils;
+import org.apache.flink.util.NetUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.util.Iterator;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /**
  * Configuration for the task manager services such as the network environment, the memory manager,
- * the io manager and the metric registry
+ * the io manager and the metric registry.
  */
 public class TaskManagerServicesConfiguration {
 	private static final Logger LOG = LoggerFactory.getLogger(TaskManagerServicesConfiguration.class);
@@ -108,7 +108,6 @@ public class TaskManagerServicesConfiguration {
 	// --------------------------------------------------------------------------------------------
 	//  Getter/Setter
 	// --------------------------------------------------------------------------------------------
-
 
 	public InetAddress getTaskManagerAddress() {
 		return taskManagerAddress;
@@ -192,8 +191,7 @@ public class TaskManagerServicesConfiguration {
 			remoteAddress,
 			slots);
 
-		final QueryableStateConfiguration queryableStateConfig = localCommunication ?
-				QueryableStateConfiguration.disabled() :
+		final QueryableStateConfiguration queryableStateConfig =
 				parseQueryableStateConfiguration(configuration);
 
 		// extract memory settings
@@ -281,20 +279,6 @@ public class TaskManagerServicesConfiguration {
 			memType = MemoryType.HEAP;
 		}
 
-		// initialize the memory segment factory accordingly
-		// TODO - this should be in the TaskManager, not the configuration
-		if (memType == MemoryType.HEAP) {
-			if (!MemorySegmentFactory.initializeIfNotInitialized(HeapMemorySegment.FACTORY)) {
-				throw new Exception("Memory type is set to heap memory, but memory segment " +
-					"factory has been initialized for off-heap memory segments");
-			}
-		} else {
-			if (!MemorySegmentFactory.initializeIfNotInitialized(HybridMemorySegment.FACTORY)) {
-				throw new Exception("Memory type is set to off-heap memory, but memory segment " +
-					"factory has been initialized for heap memory segments");
-			}
-		}
-
 		// network buffer memory fraction
 
 		float networkBufFraction = configuration.getFloat(TaskManagerOptions.NETWORK_BUFFERS_MEMORY_FRACTION);
@@ -308,7 +292,7 @@ public class TaskManagerServicesConfiguration {
 
 		if (!hasNewNetworkBufConf(configuration)) {
 			// map old config to new one:
-			networkBufMin = networkBufMax = ((long)numNetworkBuffers) * pageSize;
+			networkBufMin = networkBufMax = ((long) numNetworkBuffers) * pageSize;
 		} else {
 			if (configuration.contains(TaskManagerOptions.NETWORK_NUM_BUFFERS)) {
 				LOG.info("Ignoring old (but still present) network buffer configuration via {}.",
@@ -432,10 +416,16 @@ public class TaskManagerServicesConfiguration {
 		final boolean enabled = config.getBoolean(QueryableStateOptions.SERVER_ENABLE);
 
 		if (enabled) {
-			int port = config.getInteger(QueryableStateOptions.SERVER_PORT);
-			int numNetworkThreads = config.getInteger(QueryableStateOptions.SERVER_NETWORK_THREADS);
-			int numQueryThreads = config.getInteger(QueryableStateOptions.SERVER_ASYNC_QUERY_THREADS);
-			return new QueryableStateConfiguration(true, port, numNetworkThreads, numQueryThreads);
+			final Iterator<Integer> proxyPorts = NetUtils.getPortRangeFromString(
+					config.getString(QueryableStateOptions.PROXY_PORT_RANGE,
+							QueryableStateOptions.PROXY_PORT_RANGE.defaultValue()));
+			final Iterator<Integer> serverPorts = NetUtils.getPortRangeFromString(
+					config.getString(QueryableStateOptions.SERVER_PORT_RANGE,
+							QueryableStateOptions.SERVER_PORT_RANGE.defaultValue()));
+
+			final int numNetworkThreads = config.getInteger(QueryableStateOptions.SERVER_NETWORK_THREADS);
+			final int numQueryThreads = config.getInteger(QueryableStateOptions.SERVER_ASYNC_QUERY_THREADS);
+			return new QueryableStateConfiguration(true, proxyPorts, serverPorts, numNetworkThreads, numQueryThreads);
 		}
 		else {
 			return QueryableStateConfiguration.disabled();
@@ -456,9 +446,8 @@ public class TaskManagerServicesConfiguration {
 	static void checkConfigParameter(boolean condition, Object parameter, String name, String errorMessage)
 			throws IllegalConfigurationException {
 		if (!condition) {
-			throw new IllegalConfigurationException("Invalid configuration value for " + 
+			throw new IllegalConfigurationException("Invalid configuration value for " +
 					name + " : " + parameter + " - " + errorMessage);
 		}
 	}
 }
-

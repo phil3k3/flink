@@ -24,6 +24,7 @@ import org.apache.flink.configuration.WebOptions;
 import org.apache.flink.util.Preconditions;
 
 import java.io.File;
+import java.util.UUID;
 
 /**
  * Configuration object containing values for the rest handler configuration.
@@ -32,13 +33,21 @@ public class RestHandlerConfiguration {
 
 	private final long refreshInterval;
 
+	private final int maxCheckpointStatisticCacheEntries;
+
 	private final Time timeout;
 
 	private final File tmpDir;
 
-	public RestHandlerConfiguration(long refreshInterval, Time timeout, File tmpDir) {
+	public RestHandlerConfiguration(
+			long refreshInterval,
+			int maxCheckpointStatisticCacheEntries,
+			Time timeout,
+			File tmpDir) {
 		Preconditions.checkArgument(refreshInterval > 0L, "The refresh interval (ms) should be larger than 0.");
 		this.refreshInterval = refreshInterval;
+
+		this.maxCheckpointStatisticCacheEntries = maxCheckpointStatisticCacheEntries;
 
 		this.timeout = Preconditions.checkNotNull(timeout);
 		this.tmpDir = Preconditions.checkNotNull(tmpDir);
@@ -46,6 +55,10 @@ public class RestHandlerConfiguration {
 
 	public long getRefreshInterval() {
 		return refreshInterval;
+	}
+
+	public int getMaxCheckpointStatisticCacheEntries() {
+		return maxCheckpointStatisticCacheEntries;
 	}
 
 	public Time getTimeout() {
@@ -59,10 +72,13 @@ public class RestHandlerConfiguration {
 	public static RestHandlerConfiguration fromConfiguration(Configuration configuration) {
 		final long refreshInterval = configuration.getLong(WebOptions.REFRESH_INTERVAL);
 
+		final int maxCheckpointStatisticCacheEntries = configuration.getInteger(WebOptions.CHECKPOINTS_HISTORY_SIZE);
+
 		final Time timeout = Time.milliseconds(configuration.getLong(WebOptions.TIMEOUT));
 
-		final File tmpDir = new File(configuration.getString(WebOptions.TMP_DIR));
+		final String rootDir = "flink-web-" + UUID.randomUUID();
+		final File tmpDir = new File(configuration.getString(WebOptions.TMP_DIR), rootDir);
 
-		return new RestHandlerConfiguration(refreshInterval, timeout, tmpDir);
+		return new RestHandlerConfiguration(refreshInterval, maxCheckpointStatisticCacheEntries, timeout, tmpDir);
 	}
 }

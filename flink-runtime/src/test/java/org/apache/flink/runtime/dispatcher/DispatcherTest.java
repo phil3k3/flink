@@ -35,6 +35,7 @@ import org.apache.flink.runtime.jobmaster.JobManagerServices;
 import org.apache.flink.runtime.leaderelection.TestingLeaderElectionService;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.metrics.MetricRegistry;
+import org.apache.flink.runtime.resourcemanager.ResourceManagerGateway;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
 import org.apache.flink.runtime.rpc.RpcUtils;
@@ -44,7 +45,9 @@ import org.apache.flink.util.TestLogger;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.mockito.Mockito;
 
 import java.util.Optional;
@@ -62,6 +65,9 @@ import static org.mockito.Mockito.when;
  * Test for the {@link Dispatcher} component.
  */
 public class DispatcherTest extends TestLogger {
+
+	@Rule
+	public TestName name = new TestName();
 
 	private static RpcService rpcService;
 	private static final Time timeout = Time.seconds(10L);
@@ -102,9 +108,10 @@ public class DispatcherTest extends TestLogger {
 
 		final TestingDispatcher dispatcher = new TestingDispatcher(
 			rpcService,
-			Dispatcher.DISPATCHER_NAME,
+			Dispatcher.DISPATCHER_NAME + '_' + name.getMethodName(),
 			new Configuration(),
 			haServices,
+			mock(ResourceManagerGateway.class),
 			mock(BlobServer.class),
 			heartbeatServices,
 			mock(MetricRegistry.class),
@@ -161,9 +168,10 @@ public class DispatcherTest extends TestLogger {
 
 		final TestingDispatcher dispatcher = new TestingDispatcher(
 			rpcService,
-			Dispatcher.DISPATCHER_NAME,
+			Dispatcher.DISPATCHER_NAME + '_' + name.getMethodName(),
 			new Configuration(),
 			haServices,
+			mock(ResourceManagerGateway.class),
 			mock(BlobServer.class),
 			heartbeatServices,
 			mock(MetricRegistry.class),
@@ -198,6 +206,7 @@ public class DispatcherTest extends TestLogger {
 				String endpointId,
 				Configuration configuration,
 				HighAvailabilityServices highAvailabilityServices,
+				ResourceManagerGateway resourceManagerGateway,
 				BlobServer blobServer,
 				HeartbeatServices heartbeatServices,
 				MetricRegistry metricRegistry,
@@ -209,6 +218,7 @@ public class DispatcherTest extends TestLogger {
 				endpointId,
 				configuration,
 				highAvailabilityServices,
+				resourceManagerGateway,
 				blobServer,
 				heartbeatServices,
 				metricRegistry,

@@ -29,7 +29,7 @@ import org.apache.calcite.tools.RelBuilder
 import org.apache.flink.api.common.typeinfo.BasicTypeInfo._
 import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.java.operators.join.JoinType
-import org.apache.flink.table.api.{StreamTableEnvironment, TableEnvironment, UnresolvedException}
+import org.apache.flink.table.api.{StreamTableEnvironment, TableEnvironment, Types, UnresolvedException}
 import org.apache.flink.table.calcite.{FlinkRelBuilder, FlinkTypeFactory}
 import org.apache.flink.table.expressions.ExpressionUtils.isRowCountLiteral
 import org.apache.flink.table.expressions._
@@ -362,7 +362,7 @@ case class Join(
     left: LogicalNode,
     right: LogicalNode) extends Attribute {
 
-    val isFromLeftInput = left.output.map(_.name).contains(name)
+    val isFromLeftInput: Boolean = left.output.map(_.name).contains(name)
 
     val (indexInInput, indexInJoin) = if (isFromLeftInput) {
       val indexInLeft = left.output.map(_.name).indexOf(name)
@@ -429,11 +429,6 @@ case class Join(
     left.output.map(_.name).toSet.intersect(right.output.map(_.name).toSet)
 
   override def validate(tableEnv: TableEnvironment): LogicalNode = {
-    if (tableEnv.isInstanceOf[StreamTableEnvironment]
-      && !right.isInstanceOf[LogicalTableFunctionCall]) {
-      failValidation(s"Join on stream tables is currently not supported.")
-    }
-
     val resolvedJoin = super.validate(tableEnv).asInstanceOf[Join]
     if (!resolvedJoin.condition.forall(_.resultType == BOOLEAN_TYPE_INFO)) {
       failValidation(s"Filter operator requires a boolean expression as input, " +
@@ -464,6 +459,11 @@ case class Join(
     var equiJoinPredicateFound = false
     var nonEquiJoinPredicateFound = false
     var localPredicateFound = false
+    // Whether the predicate is literal true.
+    val alwaysTrue = expression match {
+      case x: Literal if x.value.equals(true) => true
+      case _ => false
+    }
 
     def validateConditions(exp: Expression, isAndBranch: Boolean): Unit = exp match {
       case x: And => x.children.foreach(validateConditions(_, isAndBranch))
@@ -481,20 +481,30 @@ case class Join(
         } else {
           nonEquiJoinPredicateFound = true
         }
+      // The boolean literal should be a valid condition type.
+      case x: Literal if x.resultType == Types.BOOLEAN =>
       case x => failValidation(
         s"Unsupported condition type: ${x.getClass.getSimpleName}. Condition: $x")
     }
 
     validateConditions(expression, isAndBranch = true)
-    if (!equiJoinPredicateFound) {
-      failValidation(
-        s"Invalid join condition: $expression. At least one equi-join predicate is " +
-          s"required.")
-    }
-    if (joinType != JoinType.INNER && (nonEquiJoinPredicateFound || localPredicateFound)) {
-      failValidation(
-        s"Invalid join condition: $expression. Non-equality join predicates or local" +
-          s" predicates are not supported in outer joins.")
+
+    // Due to a bug in Apache Calcite (see CALCITE-2004 and FLINK-7865) we cannot accept join
+    // predicates except literal true for TableFunction left outer join.
+    if (correlated && right.isInstanceOf[LogicalTableFunctionCall] && joinType != JoinType.INNER ) {
+      if (!alwaysTrue) failValidation("TableFunction left outer join predicate can only be " +
+        "empty or literal true.")
+    } else {
+      if (!equiJoinPredicateFound) {
+        failValidation(
+          s"Invalid join condition: $expression. At least one equi-join predicate is " +
+            s"required.")
+      }
+      if (joinType != JoinType.INNER && (nonEquiJoinPredicateFound || localPredicateFound)) {
+        failValidation(
+          s"Invalid join condition: $expression. Non-equality join predicates or local" +
+            s" predicates are not supported in outer joins.")
+      }
     }
   }
 }
@@ -728,6 +738,7 @@ case class LogicalTableFunctionCall(
     val typeFactory = relBuilder.getTypeFactory.asInstanceOf[FlinkTypeFactory]
     val sqlFunction = new TableSqlFunction(
       tableFunction.functionIdentifier,
+      tableFunction.toString,
       tableFunction,
       resultType,
       typeFactory,

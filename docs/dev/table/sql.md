@@ -405,11 +405,10 @@ FROM Orders LEFT JOIN Product ON Orders.productId = Product.id
             <li>Time predicates must compare time attributes of both input tables.</li>
             <li>Time predicates must compare only time attributes of the same type, i.e., processing time with processing time or event time with event time.</li>
             <li>Only range predicates are valid time predicates.</li>
-            <li>Non-time predicates must not access a time attribute.</li>
           </ul>
         </p>
 
-        <p><b>Note:</b> Currently, only processing time window joins and <code>INNER</code> joins are supported.</p>
+        <p><b>Note:</b> Currently, only <code>INNER</code> joins are supported.</p>
 
 {% highlight sql %}
 SELECT *
@@ -436,11 +435,12 @@ FROM Orders CROSS JOIN UNNEST(tags) AS t (tag)
     </tr>
     <tr>
     	<td>
-        <strong>User Defined Table Functions (UDTF)</strong><br>
+        <strong>Join with User Defined Table Functions (UDTF)</strong><br>
         <span class="label label-primary">Batch</span> <span class="label label-primary">Streaming</span>
       </td>
     	<td>
       <p>UDTFs must be registered in the TableEnvironment. See the <a href="udfs.html">UDF documentation</a> for details on how to specify and register UDTFs. </p>
+      <p><b>Note:</b> Currently only literal <code>TRUE</code> can be accepted as the predicate for the left outer join against a lateral table.</p>
 {% highlight sql %}
 SELECT users, tag
 FROM Orders LATERAL VIEW UNNEST_UDTF(tags) t AS tag
@@ -803,6 +803,7 @@ The SQL runtime is built on top of Flink's DataSet and DataStream APIs. Internal
 | `Types.PRIMITIVE_ARRAY`| `ARRAY`                     | e.g. `int[]`           |
 | `Types.OBJECT_ARRAY`   | `ARRAY`                     | e.g. `java.lang.Byte[]`|
 | `Types.MAP`            | `MAP`                       | `java.util.HashMap`    |
+| `Types.MULTISET`       | `MULTISET`                  | e.g. `java.util.HashMap<String, Integer>` for a multiset of `String` |
 
 
 Advanced types such as generic types, composite types (e.g. POJOs or Tuples), and array types (object or primitive arrays) can be fields of a row.
@@ -2164,6 +2165,17 @@ VAR_SAMP(value)
         <p>Returns the sample variance (square of the sample standard deviation) of the numeric field across all input values.</p>
       </td>
     </tr>
+
+    <tr>
+      <td>
+          {% highlight text %}
+          COLLECT(value)
+          {% endhighlight %}
+      </td>
+      <td>
+          <p>Returns a multiset of the <i>value</i>s. null input <i>value</i> will be ignored. Return an empty multiset if only null values are added. </p>
+      </td>
+    </tr>
   </tbody>
 </table>
 
@@ -2283,7 +2295,6 @@ The following functions are not supported yet:
 
 - Binary string operators and functions
 - System functions
-- Collection functions
 - Distinct aggregate functions like COUNT DISTINCT
 
 {% top %}

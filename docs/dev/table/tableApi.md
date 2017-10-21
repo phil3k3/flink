@@ -464,6 +464,7 @@ val result: Table = orders
 val orders: Table = tableEnv.scan("Orders")
 val result = orders.distinct()
 {% endhighlight %}
+        <p><b>Note:</b> For streaming queries the required state to compute the query result might grow infinitely depending on the number of distinct fields. Please provide a query configuration with valid retention interval to prevent excessive state size. See <a href="streaming.html">Streaming Concepts</a> for details.</p>
       </td>
     </tr>
   </tbody>
@@ -503,51 +504,51 @@ Table result = left.join(right).where("a = d").select("a, b, e");
 
     <tr>
       <td>
-        <strong>Left Outer Join</strong><br>
+        <strong>Outer Joins</strong><br>
         <span class="label label-primary">Batch</span>
       </td>
       <td>
-        <p>Similar to a SQL LEFT OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
+        <p>Similar to SQL LEFT/RIGHT/FULL OUTER JOIN clauses. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
 {% highlight java %}
 Table left = tableEnv.fromDataSet(ds1, "a, b, c");
 Table right = tableEnv.fromDataSet(ds2, "d, e, f");
-Table result = left.leftOuterJoin(right, "a = d").select("a, b, e");
+
+Table leftOuterResult = left.leftOuterJoin(right, "a = d").select("a, b, e");
+Table rightOuterResult = left.rightOuterJoin(right, "a = d").select("a, b, e");
+Table fullOuterResult = left.fullOuterJoin(right, "a = d").select("a, b, e");
 {% endhighlight %}
       </td>
     </tr>
-
     <tr>
-      <td>
-        <strong>Right Outer Join</strong><br>
+      <td><strong>Time-windowed Join</strong><br>
         <span class="label label-primary">Batch</span>
+        <span class="label label-primary">Streaming</span>
       </td>
       <td>
-        <p>Similar to a SQL RIGHT OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
-{% highlight java %}
-Table left = tableEnv.fromDataSet(ds1, "a, b, c");
-Table right = tableEnv.fromDataSet(ds2, "d, e, f");
-Table result = left.rightOuterJoin(right, "a = d").select("a, b, e");
-{% endhighlight %}
-      </td>
-    </tr>
+        <p><b>Note:</b> Time-windowed joins are a subset of regular joins that can be processed in a streaming fashion.</p>
 
-    <tr>
-      <td>
-        <strong>Full Outer Join</strong><br>
-        <span class="label label-primary">Batch</span>
-      </td>
-      <td>
-        <p>Similar to a SQL FULL OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
+        <p>A time-windowed join requires an equi-join predicate and a special join condition that bounds the time on both sides. Such a condition can be defined by two appropriate range predicates (<code> &lt;, &lt;=, &gt;=, &gt;</code>) that compare the <a href="streaming.html#time-attributes">time attributes</a> of both input tables. The following rules apply for time predicates:
+          <ul>
+            <li>The time attribute of a stream must be compared to a bounded interval on a time attribute of the opposite stream.</li>
+            <li>The compared time attributes must be of the same type, i.e., both are processing time or event time.</li>
+          </ul>
+        </p>
+
+        <p><b>Note:</b> Currently, only <code>INNER</code> time-windowed joins are supported.</p>
+
 {% highlight java %}
-Table left = tableEnv.fromDataSet(ds1, "a, b, c");
-Table right = tableEnv.fromDataSet(ds2, "d, e, f");
-Table result = left.fullOuterJoin(right, "a = d").select("a, b, e");
+Table left = tableEnv.fromDataSet(ds1, "a, b, c, ltime.rowtime");
+Table right = tableEnv.fromDataSet(ds2, "d, e, f, rtime.rowtime");
+
+Table result = left.join(right)
+  .where("a = d && ltime >= rtime - 5.minutes && ltime < rtime + 10.minutes")
+  .select("a, b, e, ltime");
 {% endhighlight %}
       </td>
     </tr>
     <tr>
     	<td>
-        <strong>TableFunction Join</strong><br>
+        <strong>TableFunction Inner Join</strong><br>
         <span class="label label-primary">Batch</span> <span class="label label-primary">Streaming</span>
       </td>
     	<td>
@@ -561,7 +562,7 @@ tEnv.registerFunction("split", split);
 // join
 Table orders = tableEnv.scan("Orders");
 Table result = orders
-    .join(new Table(tEnv, "split(c)").as("s", "t", "v")))
+    .join(new Table(tEnv, "split(c)").as("s", "t", "v"))
     .select("a, b, s, t, v");
 {% endhighlight %}
       </td>
@@ -573,6 +574,7 @@ Table result = orders
       </td>
       <td>
         <p>Joins a table with a the results of a table function. Each row of the left (outer) table is joined with all rows produced by the corresponding call of the table function. If a table function call returns an empty result, the corresponding outer row is preserved and the result padded with null values.
+        <p><b>Note:</b> Currently, the predicate of a table function left outer join can only be empty or literal <code>true</code>.</p>
         </p>
 {% highlight java %}
 // register function
@@ -582,7 +584,7 @@ tEnv.registerFunction("split", split);
 // join
 Table orders = tableEnv.scan("Orders");
 Table result = orders
-    .leftOuterJoin(new Table(tEnv, "split(c)").as("s", "t", "v")))
+    .leftOuterJoin(new Table(tEnv, "split(c)").as("s", "t", "v"))
     .select("a, b, s, t, v");
 {% endhighlight %}
       </td>
@@ -609,7 +611,7 @@ Table result = orders
         <span class="label label-primary">Batch</span>
       </td>
       <td>
-        <p>Similar to a SQL JOIN clause. Joins two tables. Both tables must have distinct field names and an equality join predicate must be defined using a where or filter operator.</p>
+        <p>Similar to a SQL JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined through join operator or using a where or filter operator.</p>
 {% highlight scala %}
 val left = ds1.toTable(tableEnv, 'a, 'b, 'c);
 val right = ds2.toTable(tableEnv, 'd, 'e, 'f);
@@ -617,54 +619,53 @@ val result = left.join(right).where('a === 'd).select('a, 'b, 'e);
 {% endhighlight %}
       </td>
     </tr>
-
     <tr>
       <td>
-        <strong>Left Outer Join</strong><br>
+        <strong>Outer Joins</strong><br>
         <span class="label label-primary">Batch</span>
       </td>
       <td>
-        <p>Similar to a SQL LEFT OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
+        <p>Similar to SQL LEFT/RIGHT/FULL OUTER JOIN clauses. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
 {% highlight scala %}
 val left = tableEnv.fromDataSet(ds1, 'a, 'b, 'c)
 val right = tableEnv.fromDataSet(ds2, 'd, 'e, 'f)
-val result = left.leftOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
+
+val leftOuterResult = left.leftOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
+val rightOuterResult = left.rightOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
+val fullOuterResult = left.fullOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
 {% endhighlight %}
       </td>
     </tr>
-
     <tr>
-      <td>
-        <strong>Right Outer Join</strong><br>
+      <td><strong>Time-windowed Join</strong><br>
         <span class="label label-primary">Batch</span>
+        <span class="label label-primary">Streaming</span>
       </td>
       <td>
-        <p>Similar to a SQL RIGHT OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
-{% highlight scala %}
-val left = tableEnv.fromDataSet(ds1, 'a, 'b, 'c)
-val right = tableEnv.fromDataSet(ds2, 'd, 'e, 'f)
-val result = left.rightOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
-{% endhighlight %}
-      </td>
-    </tr>
+        <p><b>Note:</b> Time-windowed joins are a subset of regular joins that can be processed in a streaming fashion.</p>
 
-    <tr>
-      <td>
-        <strong>Full Outer Join</strong><br>
-        <span class="label label-primary">Batch</span>
-      </td>
-      <td>
-        <p>Similar to a SQL FULL OUTER JOIN clause. Joins two tables. Both tables must have distinct field names and at least one equality join predicate must be defined.</p>
+        <p>A time-windowed join requires an equi-join predicate and a special join condition that bounds the time on both sides. Such a condition can be defined by two appropriate range predicates (<code> &lt;, &lt;=, &gt;=, &gt;</code>) that compare the <a href="streaming.html#time-attributes">time attributes</a> of both input tables. The following rules apply for time predicates:
+          <ul>
+            <li>The time attribute of a stream must be compared to a bounded interval on a time attribute of the opposite stream.</li>
+            <li>The compared time attributes must be of the same type, i.e., both are processing time or event time.</li>
+          </ul>
+        </p>
+
+        <p><b>Note:</b> Currently, only <code>INNER</code> time-windowed joins are supported.</p>
+
 {% highlight scala %}
-val left = tableEnv.fromDataSet(ds1, 'a, 'b, 'c)
-val right = tableEnv.fromDataSet(ds2, 'd, 'e, 'f)
-val result = left.fullOuterJoin(right, 'a === 'd).select('a, 'b, 'e)
+val left = ds1.toTable(tableEnv, 'a, 'b, 'c, 'ltime.rowtime);
+val right = ds2.toTable(tableEnv, 'd, 'e, 'f, 'rtime.rowtime);
+
+val result = left.join(right)
+  .where('a === 'd && 'ltime >= 'rtime - 5.minutes && 'ltime < 'rtime + 10.minutes)
+  .select('a, 'b, 'e, 'ltime);
 {% endhighlight %}
       </td>
     </tr>
     <tr>
     	<td>
-        <strong>TableFunction Join</strong><br>
+        <strong>TableFunction Inner Join</strong><br>
         <span class="label label-primary">Batch</span> <span class="label label-primary">Streaming</span>
       </td>
     	<td>
@@ -687,6 +688,7 @@ val result: Table = table
         <span class="label label-primary">Batch</span> <span class="label label-primary">Streaming</span></td>
     	<td>
         <p>Joins a table with a the results of a table function. Each row of the left (outer) table is joined with all rows produced by the corresponding call of the table function. If a table function call returns an empty result, the corresponding outer row is preserved and the result padded with null values.
+        <p><b>Note:</b> Currently, the predicate of a table function left outer join can only be empty or literal <code>true</code>.</p>
         </p>
 {% highlight scala %}
 // instantiate function
@@ -1443,7 +1445,7 @@ The `OverWindow` defines a range of rows over which aggregates are computed. `Ov
 
         <ul>
           <li><code>CURRENT_ROW</code> sets the upper bound of the window to the current row.</li>
-          <li><code>CURRENT_RANGE</code> sets the upper bound of the window to sort key of the the current row, i.e., all rows with the same sort key as the current row are included in the window.</li>
+          <li><code>CURRENT_RANGE</code> sets the upper bound of the window to sort key of the current row, i.e., all rows with the same sort key as the current row are included in the window.</li>
         </ul>
 
         <p>If the <code>following</code> clause is omitted, the upper bound of a time interval window is defined as <code>CURRENT_RANGE</code> and the upper bound of a row-count interval window is defined as <code>CURRENT_ROW</code>.</p>

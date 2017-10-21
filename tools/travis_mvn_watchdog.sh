@@ -67,10 +67,15 @@ flink-libraries/flink-gelly-scala,\
 flink-libraries/flink-gelly-examples,\
 flink-libraries/flink-ml,\
 flink-libraries/flink-python,\
-flink-libraries/flink-table"
+flink-libraries/flink-table,\
+flink-queryable-state/flink-queryable-state-java"
 
 MODULES_CONNECTORS="\
 flink-contrib/flink-connector-wikiedits,\
+flink-filesystems/flink-hadoop-fs,\
+flink-filesystems/flink-mapr-fs,\
+flink-filesystems/flink-s3-fs-hadoop,\
+flink-filesystems/flink-s3-fs-presto,\
 flink-connectors/flink-avro,\
 flink-connectors/flink-hbase,\
 flink-connectors/flink-hcatalog,\
@@ -92,6 +97,10 @@ flink-connectors/flink-connector-twitter"
 
 MODULES_TESTS="\
 flink-tests"
+
+if [[ $PROFILE != *"scala-2.10"* ]]; then
+	MODULES_CONNECTORS="$MODULES_CONNECTORS,flink-connectors/flink-connector-kafka-0.11"
+fi
 
 if [[ $PROFILE == *"include-kinesis"* ]]; then
 	case $TEST in
@@ -301,11 +310,18 @@ check_shaded_artifacts() {
 		return 1
 	fi
 
+	FLINK_PYTHON=`cat allClasses | grep '^org/apache/flink/python' | wc -l`
+	if [ "$FLINK_PYTHON" != "0" ]; then
+		echo "=============================================================================="
+		echo "Detected that the Flink Python artifact is in the dist jar"
+		echo "=============================================================================="
+		return 1
+	fi
 
 	HADOOP=`cat allClasses | grep '^org/apache/hadoop' | wc -l`
 	if [ "$HADOOP" != "0" ]; then
 		echo "=============================================================================="
-		echo "Detected '$HADOOP' Hadoop classes in the dist jar
+		echo "Detected '$HADOOP' Hadoop classes in the dist jar"
 		echo "=============================================================================="
 		return 1
 	fi
@@ -313,7 +329,7 @@ check_shaded_artifacts() {
 	MAPR=`cat allClasses | grep '^com/mapr' | wc -l`
 	if [ "$MAPR" != "0" ]; then
 		echo "=============================================================================="
-		echo "Detected '$MAPR' MapR classes in the dist jar
+		echo "Detected '$MAPR' MapR classes in the dist jar"
 		echo "=============================================================================="
 		return 1
 	fi

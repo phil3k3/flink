@@ -56,7 +56,7 @@ import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.query.KvStateID;
 import org.apache.flink.runtime.query.KvStateRegistry;
 import org.apache.flink.runtime.query.KvStateRegistryListener;
-import org.apache.flink.runtime.query.netty.message.KvStateRequestSerializer;
+import org.apache.flink.runtime.query.netty.message.KvStateSerializer;
 import org.apache.flink.runtime.state.heap.AbstractHeapState;
 import org.apache.flink.runtime.state.heap.NestedMapsStateTable;
 import org.apache.flink.runtime.state.heap.StateTable;
@@ -66,13 +66,12 @@ import org.apache.flink.runtime.state.internal.InternalListState;
 import org.apache.flink.runtime.state.internal.InternalReducingState;
 import org.apache.flink.runtime.state.internal.InternalValueState;
 import org.apache.flink.runtime.util.BlockerCheckpointStreamFactory;
+import org.apache.flink.shaded.guava18.com.google.common.base.Joiner;
 import org.apache.flink.types.IntValue;
 import org.apache.flink.util.FutureUtil;
 import org.apache.flink.util.IOUtils;
 import org.apache.flink.util.StateMigrationException;
 import org.apache.flink.util.TestLogger;
-
-import org.apache.flink.shaded.guava18.com.google.common.base.Joiner;
 
 import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
@@ -1714,10 +1713,10 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 	}
 
 	@Test
-	public void testAggregatingStateAddAndGet() throws Exception {
+	public void testAggregatingStateAddAndGetWithMutableAccumulator() throws Exception {
 
 		final AggregatingStateDescriptor<Long, MutableLong, Long> stateDescr =
-			new AggregatingStateDescriptor<>("my-state", new AggregatingAddingFunction(), MutableLong.class);
+			new AggregatingStateDescriptor<>("my-state", new MutableAggregatingAddingFunction(), MutableLong.class);
 		
 		AbstractKeyedStateBackend<String> keyedBackend = createKeyedBackend(StringSerializer.INSTANCE);
 
@@ -1769,10 +1768,183 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 	}
 
 	@Test
-	public void testAggregatingStateMerging() throws Exception {
+	public void testAggregatingStateMergingWithMutableAccumulator() throws Exception {
 
 		final AggregatingStateDescriptor<Long, MutableLong, Long> stateDescr =
-			new AggregatingStateDescriptor<>("my-state", new AggregatingAddingFunction(), MutableLong.class);
+			new AggregatingStateDescriptor<>("my-state", new MutableAggregatingAddingFunction(), MutableLong.class);
+
+		final Integer namespace1 = 1;
+		final Integer namespace2 = 2;
+		final Integer namespace3 = 3;
+
+		final Long expectedResult = 165L;
+
+		AbstractKeyedStateBackend<String> keyedBackend = createKeyedBackend(StringSerializer.INSTANCE);
+
+		try {
+			InternalAggregatingState<Integer, Long, Long> state =
+				(InternalAggregatingState<Integer, Long, Long>) keyedBackend.getPartitionedState(0, IntSerializer.INSTANCE, stateDescr);
+
+			// populate the different namespaces
+			//  - abc spreads the values over three namespaces
+			//  - def spreads teh values over two namespaces (one empty)
+			//  - ghi is empty
+			//  - jkl has all elements already in the target namespace
+			//  - mno has all elements already in one source namespace
+
+			keyedBackend.setCurrentKey("abc");
+			state.setCurrentNamespace(namespace1);
+			state.add(33L);
+			state.add(55L);
+
+			state.setCurrentNamespace(namespace2);
+			state.add(22L);
+			state.add(11L);
+
+			state.setCurrentNamespace(namespace3);
+			state.add(44L);
+
+			keyedBackend.setCurrentKey("def");
+			state.setCurrentNamespace(namespace1);
+			state.add(11L);
+			state.add(44L);
+
+			state.setCurrentNamespace(namespace3);
+			state.add(22L);
+			state.add(55L);
+			state.add(33L);
+
+			keyedBackend.setCurrentKey("jkl");
+			state.setCurrentNamespace(namespace1);
+			state.add(11L);
+			state.add(22L);
+			state.add(33L);
+			state.add(44L);
+			state.add(55L);
+
+			keyedBackend.setCurrentKey("mno");
+			state.setCurrentNamespace(namespace3);
+			state.add(11L);
+			state.add(22L);
+			state.add(33L);
+			state.add(44L);
+			state.add(55L);
+
+			keyedBackend.setCurrentKey("abc");
+			state.mergeNamespaces(namespace1, asList(namespace2, namespace3));
+			state.setCurrentNamespace(namespace1);
+			assertEquals(expectedResult, state.get());
+
+			keyedBackend.setCurrentKey("def");
+			state.mergeNamespaces(namespace1, asList(namespace2, namespace3));
+			state.setCurrentNamespace(namespace1);
+			assertEquals(expectedResult, state.get());
+
+			keyedBackend.setCurrentKey("ghi");
+			state.mergeNamespaces(namespace1, asList(namespace2, namespace3));
+			state.setCurrentNamespace(namespace1);
+			assertNull(state.get());
+
+			keyedBackend.setCurrentKey("jkl");
+			state.mergeNamespaces(namespace1, asList(namespace2, namespace3));
+			state.setCurrentNamespace(namespace1);
+			assertEquals(expectedResult, state.get());
+
+			keyedBackend.setCurrentKey("mno");
+			state.mergeNamespaces(namespace1, asList(namespace2, namespace3));
+			state.setCurrentNamespace(namespace1);
+			assertEquals(expectedResult, state.get());
+
+			// make sure all lists / maps are cleared
+
+			keyedBackend.setCurrentKey("abc");
+			state.setCurrentNamespace(namespace1);
+			state.clear();
+
+			keyedBackend.setCurrentKey("def");
+			state.setCurrentNamespace(namespace1);
+			state.clear();
+
+			keyedBackend.setCurrentKey("ghi");
+			state.setCurrentNamespace(namespace1);
+			state.clear();
+
+			keyedBackend.setCurrentKey("jkl");
+			state.setCurrentNamespace(namespace1);
+			state.clear();
+
+			keyedBackend.setCurrentKey("mno");
+			state.setCurrentNamespace(namespace1);
+			state.clear();
+
+			assertThat("State backend is not empty.", keyedBackend.numStateEntries(), is(0));
+		}
+		finally {
+			keyedBackend.close();
+			keyedBackend.dispose();
+		}
+	}
+
+	@Test
+	public void testAggregatingStateAddAndGetWithImmutableAccumulator() throws Exception {
+
+		final AggregatingStateDescriptor<Long, Long, Long> stateDescr =
+			new AggregatingStateDescriptor<>("my-state", new ImmutableAggregatingAddingFunction(), Long.class);
+
+		AbstractKeyedStateBackend<String> keyedBackend = createKeyedBackend(StringSerializer.INSTANCE);
+
+		try {
+			AggregatingState<Long, Long> state =
+				keyedBackend.getPartitionedState(VoidNamespace.INSTANCE, VoidNamespaceSerializer.INSTANCE, stateDescr);
+
+			keyedBackend.setCurrentKey("abc");
+			assertNull(state.get());
+
+			keyedBackend.setCurrentKey("def");
+			assertNull(state.get());
+			state.add(17L);
+			state.add(11L);
+			assertEquals(28L, state.get().longValue());
+
+			keyedBackend.setCurrentKey("abc");
+			assertNull(state.get());
+
+			keyedBackend.setCurrentKey("g");
+			assertNull(state.get());
+			state.add(1L);
+			state.add(2L);
+
+			keyedBackend.setCurrentKey("def");
+			assertEquals(28L, state.get().longValue());
+			state.clear();
+			assertNull(state.get());
+
+			keyedBackend.setCurrentKey("g");
+			state.add(3L);
+			state.add(2L);
+			state.add(1L);
+
+			keyedBackend.setCurrentKey("def");
+			assertNull(state.get());
+
+			keyedBackend.setCurrentKey("g");
+			assertEquals(9L, state.get().longValue());
+			state.clear();
+
+			// make sure all lists / maps are cleared
+			assertThat("State backend is not empty.", keyedBackend.numStateEntries(), is(0));
+		}
+		finally {
+			keyedBackend.close();
+			keyedBackend.dispose();
+		}
+	}
+
+	@Test
+	public void testAggregatingStateMergingWithImmutableAccumulator() throws Exception {
+
+		final AggregatingStateDescriptor<Long, Long, Long> stateDescr =
+			new AggregatingStateDescriptor<>("my-state", new ImmutableAggregatingAddingFunction(), Long.class);
 
 		final Integer namespace1 = 1;
 		final Integer namespace2 = 2;
@@ -2914,6 +3086,74 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		}
 	}
 
+	/**
+	 * The purpose of this test is to check that parallel snapshots are possible, and work even if a previous snapshot
+	 * is still running and blocking.
+	 */
+	@Test
+	public void testParallelAsyncSnapshots() throws Exception {
+		OneShotLatch blocker = new OneShotLatch();
+		OneShotLatch waiter = new OneShotLatch();
+		BlockerCheckpointStreamFactory streamFactory = new BlockerCheckpointStreamFactory(1024 * 1024);
+		streamFactory.setWaiterLatch(waiter);
+		streamFactory.setBlockerLatch(blocker);
+		streamFactory.setAfterNumberInvocations(10);
+
+		final AbstractKeyedStateBackend<Integer> backend = createKeyedBackend(IntSerializer.INSTANCE);
+
+		try {
+
+			if (!backend.supportsAsynchronousSnapshots()) {
+				return;
+			}
+
+			// insert some data to the backend.
+			InternalValueState<VoidNamespace, Integer> valueState = backend.createValueState(
+				VoidNamespaceSerializer.INSTANCE,
+				new ValueStateDescriptor<>("test", IntSerializer.INSTANCE));
+
+			valueState.setCurrentNamespace(VoidNamespace.INSTANCE);
+
+			for (int i = 0; i < 10; ++i) {
+				backend.setCurrentKey(i);
+				valueState.update(i);
+			}
+
+			RunnableFuture<KeyedStateHandle> snapshot1 =
+				backend.snapshot(0L, 0L, streamFactory, CheckpointOptions.forFullCheckpoint());
+
+			Thread runner1 = new Thread(snapshot1, "snapshot-1-runner");
+			runner1.start();
+			// after this call returns, we have a running snapshot-1 that is blocked in IO.
+			waiter.await();
+
+			// do some updates in between the snapshots.
+			for (int i = 5; i < 15; ++i) {
+				backend.setCurrentKey(i);
+				valueState.update(i + 1);
+			}
+
+			// we don't want to block the second snapshot.
+			streamFactory.setWaiterLatch(null);
+			streamFactory.setBlockerLatch(null);
+
+			RunnableFuture<KeyedStateHandle> snapshot2 =
+				backend.snapshot(1L, 1L, streamFactory, CheckpointOptions.forFullCheckpoint());
+
+			Thread runner2 = new Thread(snapshot2,"snapshot-2-runner");
+			runner2.start();
+			// snapshot-2 should run and succeed, while snapshot-1 is still running and blocked in IO.
+			snapshot2.get();
+
+			// we release the blocking IO so that snapshot-1 can also finish and succeed.
+			blocker.trigger();
+			snapshot1.get();
+
+		} finally {
+			backend.dispose();
+		}
+	}
+
 	@Test
 	public void testAsyncSnapshot() throws Exception {
 		OneShotLatch waiter = new OneShotLatch();
@@ -3070,7 +3310,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 			TypeSerializer<N> namespaceSerializer,
 			TypeSerializer<V> valueSerializer) throws Exception {
 
-		byte[] serializedKeyAndNamespace = KvStateRequestSerializer.serializeKeyAndNamespace(
+		byte[] serializedKeyAndNamespace = KvStateSerializer.serializeKeyAndNamespace(
 				key, keySerializer, namespace, namespaceSerializer);
 
 		byte[] serializedValue = kvState.getSerializedValue(serializedKeyAndNamespace);
@@ -3078,7 +3318,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		if (serializedValue == null) {
 			return null;
 		} else {
-			return KvStateRequestSerializer.deserializeValue(serializedValue, valueSerializer);
+			return KvStateSerializer.deserializeValue(serializedValue, valueSerializer);
 		}
 	}
 
@@ -3094,7 +3334,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 			TypeSerializer<N> namespaceSerializer,
 			TypeSerializer<V> valueSerializer) throws Exception {
 
-		byte[] serializedKeyAndNamespace = KvStateRequestSerializer.serializeKeyAndNamespace(
+		byte[] serializedKeyAndNamespace = KvStateSerializer.serializeKeyAndNamespace(
 				key, keySerializer, namespace, namespaceSerializer);
 
 		byte[] serializedValue = kvState.getSerializedValue(serializedKeyAndNamespace);
@@ -3102,7 +3342,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		if (serializedValue == null) {
 			return null;
 		} else {
-			return KvStateRequestSerializer.deserializeList(serializedValue, valueSerializer);
+			return KvStateSerializer.deserializeList(serializedValue, valueSerializer);
 		}
 	}
 
@@ -3120,7 +3360,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 			TypeSerializer<UV> userValueSerializer
 	) throws Exception {
 
-		byte[] serializedKeyAndNamespace = KvStateRequestSerializer.serializeKeyAndNamespace(
+		byte[] serializedKeyAndNamespace = KvStateSerializer.serializeKeyAndNamespace(
 				key, keySerializer, namespace, namespaceSerializer);
 
 		byte[] serializedValue = kvState.getSerializedValue(serializedKeyAndNamespace);
@@ -3128,7 +3368,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		if (serializedValue == null) {
 			return null;
 		} else {
-			return KvStateRequestSerializer.deserializeMap(serializedValue, userKeySerializer, userValueSerializer);
+			return KvStateSerializer.deserializeMap(serializedValue, userKeySerializer, userValueSerializer);
 		}
 	}
 
@@ -3383,7 +3623,7 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 	}
 
 	@SuppressWarnings("serial")
-	private static class AggregatingAddingFunction implements AggregateFunction<Long, MutableLong, Long> {
+	private static class MutableAggregatingAddingFunction implements AggregateFunction<Long, MutableLong, Long> {
 
 		@Override
 		public MutableLong createAccumulator() {
@@ -3391,8 +3631,9 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		}
 
 		@Override
-		public void add(Long value, MutableLong accumulator) {
+		public MutableLong add(Long value, MutableLong accumulator) {
 			accumulator.value += value;
+			return accumulator;
 		}
 
 		@Override
@@ -3404,6 +3645,30 @@ public abstract class StateBackendTestBase<B extends AbstractStateBackend> exten
 		public MutableLong merge(MutableLong a, MutableLong b) {
 			a.value += b.value;
 			return a;
+		}
+	}
+
+	@SuppressWarnings("serial")
+	private static class ImmutableAggregatingAddingFunction implements AggregateFunction<Long, Long, Long> {
+
+		@Override
+		public Long createAccumulator() {
+			return 0L;
+		}
+
+		@Override
+		public Long add(Long value, Long accumulator) {
+			return accumulator += value;
+		}
+
+		@Override
+		public Long getResult(Long accumulator) {
+			return accumulator;
+		}
+
+		@Override
+		public Long merge(Long a, Long b) {
+			return a + b;
 		}
 	}
 
