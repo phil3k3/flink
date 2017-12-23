@@ -24,30 +24,32 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.akka.AkkaUtils;
-import org.apache.flink.runtime.checkpoint.CheckpointRecoveryFactory;
+import org.apache.flink.runtime.blob.PermanentBlobService;
+import org.apache.flink.runtime.blob.VoidBlobWriter;
+import org.apache.flink.runtime.checkpoint.StandaloneCheckpointRecoveryFactory;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptor;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.failover.FailoverRegion;
 import org.apache.flink.runtime.executiongraph.restart.NoRestartStrategy;
 import org.apache.flink.runtime.executiongraph.restart.RestartStrategy;
+import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.executiongraph.utils.SimpleSlotProvider;
 import org.apache.flink.runtime.instance.BaseTestingActorGateway;
 import org.apache.flink.runtime.instance.HardwareDescription;
 import org.apache.flink.runtime.instance.Instance;
 import org.apache.flink.runtime.instance.InstanceID;
 import org.apache.flink.runtime.instance.SimpleSlot;
-import org.apache.flink.runtime.instance.SlotProvider;
+import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.scheduler.Scheduler;
-import org.apache.flink.runtime.jobmanager.slots.AllocatedSlot;
-import org.apache.flink.runtime.jobmanager.slots.SlotOwner;
+import org.apache.flink.runtime.instance.SimpleSlotContext;
+import org.apache.flink.runtime.jobmaster.SlotOwner;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
 import org.apache.flink.runtime.messages.Acknowledge;
 import org.apache.flink.runtime.messages.TaskMessages.CancelTask;
@@ -58,25 +60,25 @@ import org.apache.flink.runtime.testingUtils.TestingUtils;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
 import org.apache.flink.util.SerializedValue;
 
+import akka.actor.Status;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import scala.concurrent.ExecutionContext;
-import scala.concurrent.ExecutionContext$;
 
 import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeoutException;
 
+import scala.concurrent.ExecutionContext;
+import scala.concurrent.ExecutionContext$;
+
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
-
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 
 /**
- * A collection of utility methods for testing the ExecutionGraph and its related classes. 
+ * A collection of utility methods for testing the ExecutionGraph and its related classes.
  */
 public class ExecutionGraphTestUtils {
 
@@ -88,10 +90,10 @@ public class ExecutionGraphTestUtils {
 
 	/**
 	 * Waits until the job has reached a certain state.
-	 * 
+	 *
 	 * <p>This method is based on polling and might miss very fast state transitions!
 	 */
-	public static void waitUntilJobStatus(ExecutionGraph eg, JobStatus status, long maxWaitMillis) 
+	public static void waitUntilJobStatus(ExecutionGraph eg, JobStatus status, long maxWaitMillis)
 			throws TimeoutException {
 
 		checkNotNull(eg);
@@ -102,7 +104,7 @@ public class ExecutionGraphTestUtils {
 		final long deadline = maxWaitMillis == 0 ? Long.MAX_VALUE : System.nanoTime() + (maxWaitMillis * 1_000_000);
 
 		while (eg.getState() != status && System.nanoTime() < deadline) {
-			try { 
+			try {
 				Thread.sleep(2);
 			} catch (InterruptedException ignored) {}
 		}
@@ -170,8 +172,8 @@ public class ExecutionGraphTestUtils {
 	}
 
 	/**
-	 * Takes all vertices in the given ExecutionGraph and switches their current
-	 * execution to RUNNING.
+	 * Takes all vertices in the given ExecutionGraph and attempts to move them
+	 * from CANCELING to CANCELED.
 	 */
 	public static void completeCancellingForAllVertices(ExecutionGraph eg) {
 		for (ExecutionVertex vertex : eg.getAllExecutionVertices()) {
@@ -181,11 +183,30 @@ public class ExecutionGraphTestUtils {
 
 	/**
 	 * Takes all vertices in the given ExecutionGraph and switches their current
-	 * execution to RUNNING.
+	 * execution to FINISHED.
 	 */
 	public static void finishAllVertices(ExecutionGraph eg) {
 		for (ExecutionVertex vertex : eg.getAllExecutionVertices()) {
 			vertex.getCurrentExecutionAttempt().markFinished();
+		}
+	}
+
+	/**
+	 * Checks that all execution are in state DEPLOYING and then switches them
+	 * to state RUNNING
+	 */
+	public static void switchToRunning(ExecutionGraph eg) {
+		// check that all execution are in state DEPLOYING
+		for (ExecutionVertex ev : eg.getAllExecutionVertices()) {
+			final Execution exec = ev.getCurrentExecutionAttempt();
+			final ExecutionState executionState = exec.getState();
+			assert executionState == ExecutionState.DEPLOYING : "Expected executionState to be DEPLOYING, was: " + executionState;
+		}
+
+		// switch executions to RUNNING
+		for (ExecutionVertex ev : eg.getAllExecutionVertices()) {
+			final Execution exec = ev.getCurrentExecutionAttempt();
+			exec.switchToRunning();
 		}
 	}
 
@@ -207,15 +228,10 @@ public class ExecutionGraphTestUtils {
 	}
 	
 	public static void setVertexResource(ExecutionVertex vertex, SimpleSlot slot) {
-		try {
-			Execution exec = vertex.getCurrentExecutionAttempt();
-			
-			Field f = Execution.class.getDeclaredField("assignedResource");
-			f.setAccessible(true);
-			f.set(exec, slot);
-		}
-		catch (Exception e) {
-			throw new RuntimeException("Modifying the slot failed", e);
+		Execution exec = vertex.getCurrentExecutionAttempt();
+
+		if(!exec.tryAssignResource(slot)) {
+			throw new RuntimeException("Could not assign resource.");
 		}
 	}
 
@@ -223,19 +239,20 @@ public class ExecutionGraphTestUtils {
 	//  Mocking Slots
 	// ------------------------------------------------------------------------
 
-	public static SimpleSlot createMockSimpleSlot(JobID jid, TaskManagerGateway gateway) {
+	public static SimpleSlot createMockSimpleSlot(TaskManagerGateway gateway) {
 		final TaskManagerLocation location = new TaskManagerLocation(
 				ResourceID.generate(), InetAddress.getLoopbackAddress(), 6572);
 
-		final AllocatedSlot allocatedSlot = new AllocatedSlot(
-				new AllocationID(),
-				jid,
-				location,
-				0,
-				ResourceProfile.UNKNOWN,
-				gateway);
+		final SimpleSlotContext allocatedSlot = new SimpleSlotContext(
+			new AllocationID(),
+			location,
+			0,
+			gateway);
 
-		return new SimpleSlot(allocatedSlot, mock(SlotOwner.class), 0);
+		return new SimpleSlot(
+			allocatedSlot,
+			mock(SlotOwner.class),
+			0);
 	}
 
 	// ------------------------------------------------------------------------
@@ -254,20 +271,18 @@ public class ExecutionGraphTestUtils {
 	 * restart strategy.
 	 */
 	public static ExecutionGraph createSimpleTestGraph(RestartStrategy restartStrategy) throws Exception {
-		JobVertex vertex = new JobVertex("vertex");
-		vertex.setInvokableClass(NoOpInvokable.class);
-		vertex.setParallelism(10);
+		JobVertex vertex = createNoOpVertex(10);
 
-		return createSimpleTestGraph(new JobID(), restartStrategy, vertex);
+		return createSimpleTestGraph(new JobID(), new SimpleAckingTaskManagerGateway(), restartStrategy, vertex);
 	}
 
 	/**
 	 * Creates an execution graph containing the given vertices.
-	 * 
+	 *
 	 * <p>The execution graph uses {@link NoRestartStrategy} as the restart strategy.
 	 */
 	public static ExecutionGraph createSimpleTestGraph(JobID jid, JobVertex... vertices) throws Exception {
-		return createSimpleTestGraph(jid, new NoRestartStrategy(), vertices);
+		return createSimpleTestGraph(jid, new SimpleAckingTaskManagerGateway(), new NoRestartStrategy(), vertices);
 	}
 
 	/**
@@ -275,6 +290,7 @@ public class ExecutionGraphTestUtils {
 	 */
 	public static ExecutionGraph createSimpleTestGraph(
 			JobID jid,
+			TaskManagerGateway taskManagerGateway,
 			RestartStrategy restartStrategy,
 			JobVertex... vertices) throws Exception {
 
@@ -283,7 +299,7 @@ public class ExecutionGraphTestUtils {
 			numSlotsNeeded += vertex.getParallelism();
 		}
 
-		SlotProvider slotProvider = new SimpleSlotProvider(jid, numSlotsNeeded);
+		SlotProvider slotProvider = new SimpleSlotProvider(jid, numSlotsNeeded, taskManagerGateway);
 
 		return createSimpleTestGraph(jid, slotProvider, restartStrategy, vertices);
 	}
@@ -294,24 +310,54 @@ public class ExecutionGraphTestUtils {
 			RestartStrategy restartStrategy,
 			JobVertex... vertices) throws Exception {
 
+		return createExecutionGraph(jid, slotProvider, restartStrategy, TestingUtils.defaultExecutor(), vertices);
+	}
+
+	public static ExecutionGraph createExecutionGraph(
+			JobID jid,
+			SlotProvider slotProvider,
+			RestartStrategy restartStrategy,
+			ScheduledExecutorService executor,
+			JobVertex... vertices) throws Exception {
+
+			return createExecutionGraph(jid, slotProvider, restartStrategy, executor, Time.seconds(10L), vertices);
+	}
+
+	public static ExecutionGraph createExecutionGraph(
+			JobID jid,
+			SlotProvider slotProvider,
+			RestartStrategy restartStrategy,
+			ScheduledExecutorService executor,
+			Time timeout,
+			JobVertex... vertices) throws Exception {
+
 		checkNotNull(jid);
 		checkNotNull(restartStrategy);
 		checkNotNull(vertices);
+		checkNotNull(timeout);
 
 		return ExecutionGraphBuilder.buildGraph(
-				null,
-				new JobGraph(jid, "test job", vertices),
-				new Configuration(),
-				TestingUtils.defaultExecutor(),
-				TestingUtils.defaultExecutor(),
-				slotProvider,
-				ExecutionGraphTestUtils.class.getClassLoader(),
-				mock(CheckpointRecoveryFactory.class),
-				Time.seconds(10),
-				restartStrategy,
-				new UnregisteredMetricsGroup(),
-				1,
-				TEST_LOGGER);
+			null,
+			new JobGraph(jid, "test job", vertices),
+			new Configuration(),
+			executor,
+			executor,
+			slotProvider,
+			ExecutionGraphTestUtils.class.getClassLoader(),
+			new StandaloneCheckpointRecoveryFactory(),
+			timeout,
+			restartStrategy,
+			new UnregisteredMetricsGroup(),
+			1,
+			VoidBlobWriter.getInstance(),
+			TEST_LOGGER);
+	}
+
+	public static JobVertex createNoOpVertex(int parallelism) {
+		JobVertex vertex = new JobVertex("vertex");
+		vertex.setInvokableClass(NoOpInvokable.class);
+		vertex.setParallelism(parallelism);
+		return vertex;
 	}
 
 	// ------------------------------------------------------------------------
@@ -333,8 +379,7 @@ public class ExecutionGraphTestUtils {
 
 	@SuppressWarnings("serial")
 	public static class SimpleActorGateway extends BaseTestingActorGateway {
-		
-		public TaskDeploymentDescriptor lastTDD;
+
 
 		public SimpleActorGateway(ExecutionContext executionContext){
 			super(executionContext);
@@ -344,7 +389,6 @@ public class ExecutionGraphTestUtils {
 		public Object handleMessage(Object message) {
 			if (message instanceof SubmitTask) {
 				SubmitTask submitTask = (SubmitTask) message;
-				lastTDD = submitTask.tasks();
 				return Acknowledge.get();
 			} else if(message instanceof CancelTask) {
 				return Acknowledge.get();
@@ -352,6 +396,35 @@ public class ExecutionGraphTestUtils {
 				return new Object();
 			} else {
 				return null;
+			}
+		}
+	}
+
+	@SuppressWarnings("serial")
+	public static class SimpleActorGatewayWithTDD extends SimpleActorGateway {
+
+		public TaskDeploymentDescriptor lastTDD;
+		private final PermanentBlobService blobCache;
+
+		public SimpleActorGatewayWithTDD(ExecutionContext executionContext, PermanentBlobService blobCache) {
+			super(executionContext);
+			this.blobCache = blobCache;
+		}
+
+		@Override
+		public Object handleMessage(Object message) {
+			if(message instanceof SubmitTask) {
+				SubmitTask submitTask = (SubmitTask) message;
+				lastTDD = submitTask.tasks();
+				try {
+					lastTDD.loadBigData(blobCache);
+					return Acknowledge.get();
+				} catch (Exception e) {
+					e.printStackTrace();
+					return new Status.Failure(e);
+				}
+			} else {
+				return super.handleMessage(message);
 			}
 		}
 	}

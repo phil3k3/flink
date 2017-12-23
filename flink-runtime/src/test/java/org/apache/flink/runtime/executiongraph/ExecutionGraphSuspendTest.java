@@ -25,11 +25,12 @@ import org.apache.flink.runtime.executiongraph.restart.FixedDelayRestartStrategy
 import org.apache.flink.runtime.executiongraph.restart.InfiniteDelayRestartStrategy;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.executiongraph.utils.SimpleSlotProvider;
-import org.apache.flink.runtime.instance.SlotProvider;
+import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
+import org.apache.flink.util.TestLogger;
 
 import org.junit.Test;
 
@@ -45,7 +46,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 /**
  * Validates that suspending out of various states works correctly.
  */
-public class ExecutionGraphSuspendTest {
+public class ExecutionGraphSuspendTest extends TestLogger {
 
 	/**
 	 * Going into SUSPENDED out of CREATED should immediately cancel everything and
@@ -218,7 +219,7 @@ public class ExecutionGraphSuspendTest {
 		validateCancelRpcCalls(gateway, parallelism);
 
 		ExecutionGraphTestUtils.completeCancellingForAllVertices(eg);
-		assertEquals(JobStatus.CANCELED, eg.getState());
+		assertEquals(JobStatus.CANCELED, eg.getTerminationFuture().get());
 
 		// suspend
 		eg.suspend(new Exception("suspend"));

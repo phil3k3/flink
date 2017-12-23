@@ -21,21 +21,24 @@ package org.apache.flink.runtime.executiongraph.utils;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
-import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
-import org.apache.flink.runtime.concurrent.Future;
-import org.apache.flink.runtime.concurrent.impl.FlinkCompletableFuture;
+import org.apache.flink.runtime.concurrent.FutureUtils;
+import org.apache.flink.runtime.jobmaster.LogicalSlot;
 import org.apache.flink.runtime.instance.SimpleSlot;
 import org.apache.flink.runtime.instance.Slot;
-import org.apache.flink.runtime.instance.SlotProvider;
+import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableException;
 import org.apache.flink.runtime.jobmanager.scheduler.ScheduledUnit;
-import org.apache.flink.runtime.jobmanager.slots.AllocatedSlot;
-import org.apache.flink.runtime.jobmanager.slots.SlotOwner;
+import org.apache.flink.runtime.instance.SimpleSlotContext;
+import org.apache.flink.runtime.jobmaster.SlotContext;
+import org.apache.flink.runtime.jobmaster.SlotOwner;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
+import org.apache.flink.util.Preconditions;
 
 import java.net.InetAddress;
 import java.util.ArrayDeque;
+import java.util.Collection;
+import java.util.concurrent.CompletableFuture;
 
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
@@ -45,7 +48,7 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 public class SimpleSlotProvider implements SlotProvider, SlotOwner {
 
-	private final ArrayDeque<AllocatedSlot> slots;
+	private final ArrayDeque<SlotContext> slots;
 
 	public SimpleSlotProvider(JobID jobId, int numSlots) {
 		this(jobId, numSlots, new SimpleAckingTaskManagerGateway());
@@ -58,20 +61,21 @@ public class SimpleSlotProvider implements SlotProvider, SlotOwner {
 		this.slots = new ArrayDeque<>(numSlots);
 
 		for (int i = 0; i < numSlots; i++) {
-			AllocatedSlot as = new AllocatedSlot(
-					new AllocationID(),
-					jobId,
-					new TaskManagerLocation(ResourceID.generate(), InetAddress.getLoopbackAddress(), 10000 + i),
-					0,
-					ResourceProfile.UNKNOWN,
-					taskManagerGateway);
+			SimpleSlotContext as = new SimpleSlotContext(
+				new AllocationID(),
+				new TaskManagerLocation(ResourceID.generate(), InetAddress.getLoopbackAddress(), 10000 + i),
+				0,
+				taskManagerGateway);
 			slots.add(as);
 		}
 	}
 
 	@Override
-	public Future<SimpleSlot> allocateSlot(ScheduledUnit task, boolean allowQueued) {
-		final AllocatedSlot slot;
+	public CompletableFuture<LogicalSlot> allocateSlot(
+			ScheduledUnit task,
+			boolean allowQueued,
+			Collection<TaskManagerLocation> preferredLocations) {
+		final SlotContext slot;
 
 		synchronized (slots) {
 			if (slots.isEmpty()) {
@@ -83,19 +87,23 @@ public class SimpleSlotProvider implements SlotProvider, SlotOwner {
 
 		if (slot != null) {
 			SimpleSlot result = new SimpleSlot(slot, this, 0);
-			return FlinkCompletableFuture.completed(result);
+			return CompletableFuture.completedFuture(result);
 		}
 		else {
-			return FlinkCompletableFuture.completedExceptionally(new NoResourceAvailableException());
+			return FutureUtils.completedExceptionally(new NoResourceAvailableException());
 		}
 	}
 
 	@Override
-	public boolean returnAllocatedSlot(Slot slot) {
+	public CompletableFuture<Boolean> returnAllocatedSlot(LogicalSlot logicalSlot) {
+		Preconditions.checkArgument(logicalSlot instanceof Slot);
+
+		final Slot slot = ((Slot) logicalSlot);
+
 		synchronized (slots) {
-			slots.add(slot.getAllocatedSlot());
+			slots.add(slot.getSlotContext());
 		}
-		return true;
+		return CompletableFuture.completedFuture(true);
 	}
 
 	public int getNumberOfAvailableSlots() {
